@@ -55,10 +55,8 @@ generate_initialize_helper() {
 }
 
 generate_benchmark_begin_helper() {
-  echo '__ready='
-  echo 'trap __ready=1 HUP'
-  echo 'kill -HUP "$MAIN_PID"'
-  echo 'until [ "$__ready" ]; do __dummy=; done'
+  echo ': > "$SHELLBENCH_CHILD_READY"'
+  echo 'until [ -e "$SHELLBENCH_START_FILE" ]; do __dummy=; done'
   echo 'while __count=$(($__count+1)); do'
   if [ "$CORRECTION_MODE" ]; then
     echo '__CORRECTION_MODE='
@@ -142,34 +140,57 @@ syntax_check() {
 }
 
 bench() {
-  MAIN_PID=$(exec sh -c 'echo $PPID')
-  export MAIN_PID
-
-  ready=0
-  trap 'ready=$(($ready + 1))' HUP
   trap 'kill -TERM -$$' INT
 
-  "$1" -c "$2" 3>&1 >/dev/null &
-  stopper "$3" "$!" &
+  sync_dir=$(mktemp -d "${TMPDIR:-/tmp}/shellbench.XXXXXX") || exit 1
+  SHELLBENCH_CHILD_READY=$sync_dir/child-ready
+  SHELLBENCH_STOPPER_READY=$sync_dir/stopper-ready
+  SHELLBENCH_START_FILE=$sync_dir/start
+  export SHELLBENCH_CHILD_READY SHELLBENCH_STOPPER_READY SHELLBENCH_START_FILE
 
-  # wait for ready
-  while [ "$ready" -lt 2 ]; do dummy=; done
+  "$1" -c "$2" 3>&1 >/dev/null &
+  child_pid=$!
+  stopper "$3" "$child_pid" &
+  stopper_pid=$!
+
+  wait_for_path "$SHELLBENCH_CHILD_READY"
+  wait_for_path "$SHELLBENCH_STOPPER_READY"
   sleep "$WARMUP_TIME" &
-  wait "$!" || exit 1
+  wait "$!" || {
+    rm -rf "$sync_dir"
+    exit 1
+  }
 
   # start benchmark
-  kill -HUP "-$$"
-  wait || exit 1
+  : > "$SHELLBENCH_START_FILE"
+  wait "$child_pid"
+  child_status=$?
+  wait "$stopper_pid"
+  stopper_status=$?
+  rm -rf "$sync_dir"
+
+  [ "$child_status" -eq 0 ] || [ "$child_status" -eq 1 ] || exit "$child_status"
+  [ "$stopper_status" -eq 0 ] || exit "$stopper_status"
 }
 
 stopper() {
-  ready=''
-  trap 'ready=1' HUP
-  kill -HUP "$MAIN_PID"
-  # shellcheck disable=SC2034
-  until [ "$ready" ]; do dummy=; done
+  : > "$SHELLBENCH_STOPPER_READY"
+  wait_for_path "$SHELLBENCH_START_FILE"
   sleep "$1"
   kill -TERM "$2"
+}
+
+wait_for_path() {
+  path=$1
+  remaining=${2:-500}
+
+  while [ ! -e "$path" ]; do
+    if [ "$remaining" -le 0 ]; then
+      abort "Timed out waiting for $path"
+    fi
+    remaining=$(($remaining - 1))
+    sleep 0.01
+  done
 }
 
 parse_bench_directive() {
