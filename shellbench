@@ -332,6 +332,14 @@ display_footer() {
   echo "* count: number of executions per second"
 }
 
+process_file() {
+  file=$1
+  tmp=$(mktemp "${TMPDIR:-/tmp}/shellbench.input.XXXXXX") || exit 1
+  preprocess < "$file" > "$tmp"
+  process "${file##*/}" < "$tmp"
+  rm -f "$tmp"
+}
+
 PARAMS=''
 
 abort() { echo "$@" >&2; exit 1; }
@@ -373,7 +381,7 @@ display_header "$SHELLS"
   $(printf '%s\n' '#bench "loop only"' '@begin' '@end' | preprocess)
 HERE
 for file in "$@"; do
-  preprocess < "$file" | process "${file##*/}"
+  process_file "$file"
 done
 display_footer
 if [ "$CORRECTION_MODE" ] && [ ! "${SHELLBENCH_NULLLOOP_COUNT:-}" ]; then
